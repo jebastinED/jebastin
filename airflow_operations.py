@@ -11,12 +11,49 @@ import time
 import boto3
 import re
 import sys
+import html
 from typing import Optional, Tuple, Any, Dict
+
+# Add the util/bin directory to Python path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+util_bin_path = os.path.join(current_dir, '..', 'util', 'bin')
+sys.path.insert(0, util_bin_path)
 
 from cyberark_edh_helper import get_secret
 from edh_credentials_helper import get_credentials
 from ops_helper import create_log, close_log
-from validation_module import InputValidator, ResponseValidator, XSSProtection
+
+# Import validation module (should be in the same directory)
+try:
+    from validation_module import InputValidator, ResponseValidator, XSSProtection
+except ImportError:
+    # Fallback classes if validation_module is not available
+    class InputValidator:
+        @staticmethod
+        def validate_hostname(hostname):
+            if not hostname or not isinstance(hostname, str):
+                raise ValueError("Hostname must be a non-empty string")
+            return hostname.strip()
+    
+    class ResponseValidator:
+        @staticmethod
+        def sanitize_external_api_data(data):
+            if data is None:
+                return ''
+            if isinstance(data, str):
+                return html.escape(data)
+            if isinstance(data, (int, float, bool)):
+                return html.escape(str(data))
+            if isinstance(data, dict):
+                return {key: ResponseValidator.sanitize_external_api_data(value) for key, value in data.items()}
+            if isinstance(data, list):
+                return [ResponseValidator.sanitize_external_api_data(item) for item in data]
+            return html.escape(str(data))
+    
+    class XSSProtection:
+        @staticmethod
+        def html_encode(data):
+            return html.escape(str(data))
 
 def setup_airflow_context(dag_name: str, env_val: str) -> Tuple[Any, str, str, str, str]:
     """

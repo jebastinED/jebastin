@@ -13,21 +13,82 @@ Contains only Flask routes and authentication logic
 
 import json
 import html
+import sys
+import os
 from flask import Flask, request, jsonify
 from functools import wraps
 
-# Import custom modules
+# Add the util/bin directory to Python path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+util_bin_path = os.path.join(current_dir, '..', 'util', 'bin')
+sys.path.insert(0, util_bin_path)
+
+# Import custom modules from util/bin
 from cyberark_edh_helper import get_secret
 from edh_credentials_helper import get_credentials
-from validation_module import (
-    XSSProtection, 
-    InputValidator, 
-    ResponseValidator, 
-    SecurityHeaders,
-    _validate_and_sanitize_user_input,
-    _deep_html_escape_json_data
-)
-from airflow_operations import trigger_dag
+from ops_helper import create_log, close_log
+
+# Import validation and airflow modules (these should be in the same directory as main_listener.py)
+try:
+    from validation_module import (
+        XSSProtection, 
+        InputValidator, 
+        ResponseValidator, 
+        SecurityHeaders,
+        _validate_and_sanitize_user_input,
+        _deep_html_escape_json_data
+    )
+    from airflow_operations import trigger_dag
+except ImportError:
+    # Fallback: if modules are not found, define basic functions inline
+    print("Warning: validation_module or airflow_operations not found. Using fallback functions.")
+    
+    # Basic fallback sanitization function
+    def _validate_and_sanitize_user_input(user_input):
+        """Fallback validation function"""
+        if user_input is None:
+            return None
+        return html.escape(str(user_input))
+    
+    def _deep_html_escape_json_data(data):
+        """Fallback sanitization function"""
+        if isinstance(data, str):
+            return html.escape(data)
+        elif isinstance(data, dict):
+            return {k: _deep_html_escape_json_data(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [_deep_html_escape_json_data(item) for item in data]
+        else:
+            return html.escape(str(data))
+    
+    # Fallback trigger_dag function
+    def trigger_dag(dag_name, env_val):
+        """Fallback trigger_dag function"""
+        return {
+            'status': 'Error',
+            'message': 'Airflow operations module not available',
+            'dag_name': html.escape(dag_name)
+        }
+    
+    # Fallback classes
+    class XSSProtection:
+        @staticmethod
+        def html_encode(data):
+            return html.escape(str(data))
+    
+    class ResponseValidator:
+        @staticmethod
+        def sanitize_external_api_data(data):
+            return _deep_html_escape_json_data(data)
+    
+    class SecurityHeaders:
+        @staticmethod
+        def add_security_headers(response):
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['X-Frame-Options'] = 'DENY'
+            response.headers['X-XSS-Protection'] = '1; mode=block'
+            return response
 
 # Create an instance of the Flask class
 app = Flask(__name__)
