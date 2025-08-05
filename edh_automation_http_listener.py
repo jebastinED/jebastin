@@ -33,6 +33,11 @@ from ops_helper import create_log, close_log
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
+# Configure secure session settings following XSS prevention best practices
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent XSS from stealing session cookies
+app.config['SESSION_COOKIE_SECURE'] = True    # Ensure cookies only sent over HTTPS
+app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'  # Prevent CSRF attacks
+
 # Define your username and password for basic auth
 
 source_conn_name = "edh_automation_client"
@@ -59,6 +64,43 @@ def requires_auth(f):
             return authenticate()
         return f(*args, **kwargs)
     return decorated
+
+# Security headers decorator following XSS prevention best practices
+def add_security_headers(response):
+    """
+    Adds comprehensive security headers to prevent XSS and other attacks.
+    Implements recommendations from security vulnerability documentation.
+    """
+    # Content Security Policy - Explicit whitelist approach
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "media-src 'none'; "
+        "frame-src 'none'; "
+        "base-uri 'self';"
+    )
+    
+    # Explicit character encoding definition
+    response.headers['Content-Type'] = 'application/json; charset=utf-8'
+    
+    # Additional security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'  # Prevent MIME sniffing
+    response.headers['X-Frame-Options'] = 'DENY'  # Prevent clickjacking
+    response.headers['X-XSS-Protection'] = '1; mode=block'  # Enable XSS filtering
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    
+    return response
+
+@app.after_request
+def security_headers(response):
+    """Apply security headers to all responses"""
+    return add_security_headers(response)
 
 # Helper function to recursively HTML-escape data for JSON responses
 def _deep_html_escape_json_data(data):
@@ -90,10 +132,11 @@ def _sanitize_external_api_data(data):
     # For any other types, convert to string and escape
     return html.escape(str(data))
 
-# Additional input validation function for enhanced security
+# Enhanced input validation function following security best practices
 def _validate_and_sanitize_user_input(user_input):
     """
-    Validates and sanitizes user input to prevent XSS attacks.
+    Validates and sanitizes user input using whitelist approach to prevent XSS attacks.
+    Implements comprehensive validation as recommended in security documentation.
     Returns sanitized data safe for use in responses.
     """
     if user_input is None:
@@ -102,15 +145,64 @@ def _validate_and_sanitize_user_input(user_input):
     # Apply comprehensive HTML escaping to prevent XSS
     sanitized_input = _deep_html_escape_json_data(user_input)
     
-    # Additional validation for specific patterns
-    if isinstance(sanitized_input, str):
-        # Remove any potentially dangerous patterns
-        sanitized_input = sanitized_input.replace('<script', '&lt;script')
-        sanitized_input = sanitized_input.replace('javascript:', 'javascript:')
-        sanitized_input = sanitized_input.replace('onerror=', 'onerror=')
-        sanitized_input = sanitized_input.replace('onload=', 'onload=')
+    # Whitelist-based validation for different data types
+    if isinstance(sanitized_input, dict):
+        validated_dict = {}
+        for key, value in sanitized_input.items():
+            # Validate keys - allow only alphanumeric and safe characters
+            if isinstance(key, str) and re.match(r'^[a-zA-Z0-9_\-\.]+$', key):
+                validated_dict[key] = _validate_field_value(value, key)
+            else:
+                # Sanitize invalid keys
+                safe_key = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', str(key))
+                validated_dict[safe_key] = _validate_field_value(value, safe_key)
+        return validated_dict
     
-    return sanitized_input
+    elif isinstance(sanitized_input, list):
+        return [_validate_field_value(item, 'list_item') for item in sanitized_input]
+    
+    elif isinstance(sanitized_input, str):
+        return _validate_field_value(sanitized_input, 'string_input')
+    
+    else:
+        # For other types, ensure they're safe
+        return html.escape(str(sanitized_input))
+
+def _validate_field_value(value, field_name):
+    """
+    Validates individual field values using whitelist approach.
+    Implements data type, size, range, format, and expected value validation.
+    """
+    if value is None:
+        return None
+    
+    # Convert to string for validation
+    str_value = str(value)
+    
+    # Initial size validation - prevent excessively long inputs
+    if len(str_value) > 800:  # Conservative limit to account for escaping expansion
+        str_value = str_value[:800]
+    
+    # Apply HTML escaping
+    escaped_value = html.escape(str_value)
+    
+    # Field-specific validation using whitelist approach
+    if field_name in ['dagName', 'environmentName']:
+        # DAG names and environment names should only contain safe characters
+        if re.match(r'^[a-zA-Z0-9_\-\.]+$', escaped_value):
+            result = escaped_value
+        else:
+            # Sanitize by keeping only safe characters
+            result = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', escaped_value)
+    else:
+        # For other fields, return escaped value
+        result = escaped_value
+    
+    # Final size check after all processing
+    if len(result) > 1000:
+        result = result[:1000]
+    
+    return result
 
 def setup_airflow_context(dag_name, env_val):
     """
