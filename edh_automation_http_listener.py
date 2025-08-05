@@ -70,6 +70,26 @@ def _deep_html_escape_json_data(data):
         return {key: _deep_html_escape_json_data(value) for key, value in data.items()}
     return data
 
+# Helper function to sanitize external API response data to prevent stored XSS
+def _sanitize_external_api_data(data):
+    """
+    Sanitizes data received from external APIs to prevent stored XSS attacks.
+    This ensures that any malicious content stored in external systems cannot
+    be executed when rendered in our responses.
+    """
+    if data is None:
+        return ''
+    if isinstance(data, str):
+        return html.escape(data)
+    if isinstance(data, (int, float, bool)):
+        return html.escape(str(data))
+    if isinstance(data, dict):
+        return {key: _sanitize_external_api_data(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_external_api_data(item) for item in data]
+    # For any other types, convert to string and escape
+    return html.escape(str(data))
+
 def setup_airflow_context(dag_name, env_val):
     """
     Centralized setup for log, environment, region, airflow_instance.
@@ -136,8 +156,17 @@ def get_session_info(log, region, airflow_instance):
 
         response = mwaa.create_web_login_token(Name=airflow_instance)
 
-        web_server_host_name = response["WebServerHostname"]
-        web_token = response["WebToken"]
+        # Sanitize AWS API response data to ensure no malicious content
+        web_server_host_name_raw = response["WebServerHostname"]
+        web_token_raw = response["WebToken"]
+        
+        # Validate hostname format to prevent URL manipulation
+        if not re.match(r'^[a-zA-Z0-9.-]+$', web_server_host_name_raw):
+            log.error(f"Invalid hostname format received from AWS: {_sanitize_external_api_data(web_server_host_name_raw)}")
+            return None
+            
+        web_server_host_name = _sanitize_external_api_data(web_server_host_name_raw)
+        web_token = _sanitize_external_api_data(web_token_raw)
         log.info(f'Web server host name : {web_server_host_name}')
 
 
@@ -221,20 +250,25 @@ def trigger_dag(dag_name, env_val):
         response = requests.post(url, cookies=cookies, json=json_body, timeout=30)
         if response.status_code == 200:
             dag_run = response.json()
-            dag_run_id = dag_run.get('dag_run_id')
-            log.info(f"DAG triggered successfully: {safe_dag_name} with run id {dag_run_id}")
+            # Sanitize all data from external API response to prevent stored XSS
+            dag_run_id_raw = dag_run.get('dag_run_id', '')
+            dag_run_id_sanitized = _sanitize_external_api_data(dag_run_id_raw)
+            
+            log.info(f"DAG triggered successfully: {safe_dag_name} with run id {dag_run_id_sanitized}")
             return {
                 'status': 'Success',
                 'dag_name': html.escape(dag_name),  # Sanitize dag_name in response
-                'dag_run_id': html.escape(str(dag_run.get('dag_run_id', ''))),  # Sanitize dag_run_id
+                'dag_run_id': dag_run_id_sanitized,  # Already sanitized above
                 'message': 'DAG triggered successfully'
             }
         else:
-            log.error(f"Failed to trigger DAG: HTTP {response.status_code} - {html.escape(response.text)}")
+            # Sanitize external API error response and limit length to prevent excessively long error messages
+            sanitized_response_text = _sanitize_external_api_data(response.text[:500])  # Limit to 500 chars
+            log.error(f"Failed to trigger DAG: HTTP {response.status_code} - {sanitized_response_text}")
             return {
                 'status': 'Failure',
                 'dag_name': html.escape(dag_name),  # Sanitize dag_name in response
-                'message': f"Failed to trigger DAG: HTTP {response.status_code} - {html.escape(response.text)}"  # Sanitize response text
+                'message': f"Failed to trigger DAG: HTTP {response.status_code} - {sanitized_response_text}"  # Sanitize response text
             }
     except requests.RequestException as e:
         log.error(f"Request to trigger DAG failed: {str(e)}")
