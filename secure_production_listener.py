@@ -394,7 +394,14 @@ def dag_trigger():
             env_val = dagTriggerRequest.get('environmentName')
 
             if not dag_name or not env_val:
-                return jsonify({'error': 'Missing dagName or environmentName'}), 400
+                # ✅ CONTINUE processing other items instead of returning immediately
+                sanitized_request_data = sanitize_for_json_output(dagTriggerRequest)
+                responses.append({
+                    "status": "Error",
+                    "message": "Missing dagName or environmentName for one of the entries.",
+                    "details": {"request_data": sanitized_request_data}
+                })
+                continue  # ✅ Move to next item
 
             try:
                 # Call Pipeline Gen
@@ -405,13 +412,28 @@ def dag_trigger():
                 responses.append(sanitized_result)
 
             except Exception as e:
-                # Catch any exception raised during generate_pipeline
+                # ✅ CONTINUE processing other items instead of returning immediately
                 error_message = html.escape(str(e))
-                return jsonify({'error': error_message}), 500
+                responses.append({
+                    "status": "Error",
+                    "message": f"An unexpected error occurred during DAG trigger for {html.escape(dag_name)}: {error_message}",
+                    "details": {
+                        "dag_name": html.escape(dag_name),
+                        "env_val": html.escape(env_val),
+                        "error": error_message
+                    }
+                })
+
+        # ✅ Determine the overall HTTP status code based on individual responses
+        overall_status_code = 200
+        for res in responses:
+            if res.get("status") == "Error":
+                overall_status_code = 500
+                break
 
         # CRITICAL FIX: Apply final sanitization to all responses before returning
         final_sanitized_responses = sanitize_for_json_output(responses)
-        return jsonify(final_sanitized_responses), 200
+        return jsonify(final_sanitized_responses), overall_status_code
         
     elif request.method == 'GET':
        return jsonify({'message': 'Placeholder dagTrigger Result'})
