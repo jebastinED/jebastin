@@ -49,6 +49,38 @@ except ImportError:
             if isinstance(data, list):
                 return [ResponseValidator.sanitize_external_api_data(item) for item in data]
             return html.escape(str(data))
+        
+        @staticmethod
+        def validate_airflow_response(data: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Validate and sanitize Airflow API response structure.
+            """
+            if not isinstance(data, dict):
+                raise ValueError("Response must be a dictionary")
+            
+            validated_data = {}
+            
+            # Extract and validate dag_run_id
+            dag_run_id = data.get('dag_run_id')
+            if dag_run_id is not None:
+                validated_data['dag_run_id'] = str(dag_run_id)
+            
+            # Extract and validate execution_date
+            execution_date = data.get('execution_date')
+            if execution_date is not None:
+                validated_data['execution_date'] = str(execution_date)
+            
+            # Extract and validate state
+            state = data.get('state')
+            if state is not None:
+                validated_data['state'] = str(state)
+            
+            # Extract and validate other common fields
+            for key in ['conf', 'dag_id', 'logical_date', 'note']:
+                if key in data:
+                    validated_data[key] = ResponseValidator.sanitize_external_api_data(data[key])
+            
+            return validated_data
     
     class XSSProtection:
         @staticmethod
@@ -289,6 +321,107 @@ def trigger_dag(dag_name: str, env_val: str) -> Dict[str, Any]:
             'message': f"Request failed: {XSSProtection.html_encode(str(e))}"
         }
         return exception_response
+    finally:
+        close_log(log.name)
+
+def get_task_instances(dag_name: str, dag_run_id: str, env_val: str) -> Optional[list]:
+    """
+    Fetch task instances for a given dag_run_id with comprehensive XSS protection.
+    Returns a list of task instances or None if failed.
+    """
+    try:
+        # Validate DAG name
+        safe_dag_name = sanitize_url_path_segment(dag_name)
+
+    except ValueError as e:
+        # Log the error but return None instead of dict to maintain function signature
+        print(f"Invalid DAG name: {XSSProtection.html_encode(dag_name)} - {XSSProtection.html_encode(str(e))}")
+        return None
+    
+    try:
+        # Validate DAG Run_ID
+        safe_dag_run_id = sanitize_url_path_segment(dag_run_id)
+
+    except ValueError as e:
+        # Log the error but return None instead of dict to maintain function signature
+        print(f"Invalid dag_run_id: {XSSProtection.html_encode(dag_run_id)} - {XSSProtection.html_encode(str(e))}")
+        return None
+    
+    log, env, region, airflow_instance, _ = setup_airflow_context(safe_dag_name, env_val)
+
+    session_info = get_session_info(log, region, airflow_instance)
+    if not session_info:
+        log.error("Authentication failed, no session info retrieved.")
+        close_log(log.name)
+        return None
+
+    web_server_host_name, session_cookie = session_info
+    
+    # Validate hostname
+    try:
+        safe_hostname = InputValidator.validate_hostname(web_server_host_name)
+    except ValueError as e:
+        log.error(f"Invalid hostname: {web_server_host_name}")
+        return None
+    
+    cookies = {"session": session_cookie}
+
+    url = f"https://{safe_hostname}/api/v1/dags/{safe_dag_name}/dagRuns/{safe_dag_run_id}/taskInstances"
+
+    try:
+        # External API call to Airflow
+        external_api_response = requests.get(url, cookies=cookies, timeout=30)
+        
+        if external_api_response.status_code == 200:
+            # Get raw response from external API
+            raw_task_instances_data = external_api_response.json()
+            
+            # CRITICAL FIX: Validate and sanitize the response structure before using it
+            if not isinstance(raw_task_instances_data, dict):
+                log.error("Invalid response format from Airflow API")
+                return None
+            
+            # Extract task_instances array from response
+            task_instances_raw = raw_task_instances_data.get('task_instances', [])
+            
+            # Validate that task_instances is a list
+            if not isinstance(task_instances_raw, list):
+                log.error("Invalid task_instances format from Airflow API")
+                return None
+            
+            # CRITICAL FIX: Sanitize each task instance to prevent Stored XSS
+            sanitized_task_instances = []
+            for task_instance in task_instances_raw:
+                if isinstance(task_instance, dict):
+                    # Sanitize each field in the task instance
+                    sanitized_task = {}
+                    for key, value in task_instance.items():
+                        # Sanitize the key name
+                        safe_key = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', str(key))
+                        # Sanitize the value
+                        sanitized_task[safe_key] = ResponseValidator.sanitize_external_api_data(value)
+                    sanitized_task_instances.append(sanitized_task)
+                else:
+                    # If task_instance is not a dict, skip it
+                    log.warning(f"Skipping invalid task instance format: {type(task_instance)}")
+            
+            log.info(f"Retrieved {len(sanitized_task_instances)} task instances for dag_run_id {safe_dag_run_id}")
+            return sanitized_task_instances
+            
+        else:
+            # Handle error responses
+            error_text = external_api_response.text
+            if error_text:
+                sanitized_error = ResponseValidator.sanitize_external_api_data(error_text[:500])
+            else:
+                sanitized_error = 'Unknown error'
+            
+            log.error(f"Failed to get task instances: HTTP {external_api_response.status_code} - {sanitized_error}")
+            return None
+            
+    except requests.RequestException as e:
+        log.error(f"Request to get task instances failed: {str(e)}")
+        return None
     finally:
         close_log(log.name)
 
