@@ -251,22 +251,6 @@ def internal_error(error):
 
 # Start the server on port 8982
 if __name__ == '__main__':
-    import ssl
-    
-    # Create secure SSL context
-    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    context.verify_mode = ssl.CERT_REQUIRED
-    context.check_hostname = True
-    context.load_cert_chain('resources/cert.pem', 'resources/key.pem')
-    
-    # Set secure cipher suites
-    context.set_ciphers('ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256')
-    
-    # Run with secure configuration
-    app.run(
-        host='0.0.0.0', 
-        port=8982, 
-        ssl_context=context,
-        threaded=True,
-        debug=False  # Disable debug mode in production
-    )
+    # Use the same SSL configuration as your current production code
+    context = ('resources/cert.pem', 'resources/key.pem')
+    app.run(host='0.0.0.0', port=8982, ssl_context=context)
