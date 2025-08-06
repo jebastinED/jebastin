@@ -165,8 +165,39 @@ def dag_trigger():
         # Ensure we have a list to process
         if isinstance(sanitized_user_input, dict):
             sanitized_user_input = [sanitized_user_input]
+        elif isinstance(sanitized_user_input, list):
+            # Validate that all items in the list are dictionaries
+            for i, item in enumerate(sanitized_user_input):
+                if not isinstance(item, dict):
+                    responses.append({
+                        "status": "Error",
+                        "message": f"Invalid request format at index {i} - expected object with dagName and environmentName.",
+                        "details": {"request_data": _deep_html_escape_json_data(item)}
+                    })
+            if responses:  # If we found errors, return them
+                final_sanitized_responses = ResponseValidator.sanitize_external_api_data(responses)
+                return jsonify(final_sanitized_responses), 400
+        else:
+            # Handle case where input is neither dict nor list
+            sanitized_input = _deep_html_escape_json_data(sanitized_user_input)
+            return jsonify({
+                "status": "Error",
+                "message": "Invalid request format - expected object or array of objects.",
+                "details": {"request_data": sanitized_input}
+            }), 400
 
         for dagTriggerRequest in sanitized_user_input:
+            # CRITICAL FIX: Validate that dagTriggerRequest is a dictionary
+            if not isinstance(dagTriggerRequest, dict):
+                # Handle case where input is not a dictionary
+                sanitized_request_data = _deep_html_escape_json_data(dagTriggerRequest)
+                responses.append({
+                    "status": "Error",
+                    "message": "Invalid request format - expected object with dagName and environmentName.",
+                    "details": {"request_data": sanitized_request_data}
+                })
+                continue
+            
             # Extract already sanitized values from sanitized input
             dag_name_sanitized = dagTriggerRequest.get('dagName', '')
             env_val_sanitized = dagTriggerRequest.get('environmentName', '')
@@ -253,6 +284,17 @@ def poll_dag():
 
         # Loop through requests (batch processing)
         for poll_request in data:
+            # CRITICAL FIX: Validate that poll_request is a dictionary
+            if not isinstance(poll_request, dict):
+                # Handle case where input is not a dictionary
+                sanitized_request_data = ResponseValidator.sanitize_external_api_data(poll_request)
+                responses.append({
+                    "status": "Error",
+                    "message": "Invalid request format - expected object with dagName, environmentName, and dagRun.",
+                    "details": {"request_data": sanitized_request_data}
+                })
+                continue
+            
             # Extract parameters from JSON payload (already sanitized above)
             dag_name = poll_request.get('dagName')
             env_val = poll_request.get('environmentName')
